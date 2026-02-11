@@ -11,6 +11,8 @@ import (
 
 func main() {
 	relayURL := flag.String("relay-url", "", "relay TCP URL (required), e.g. tcp://127.0.0.1:8080")
+	roomName := flag.String("room-name", "", "optional human-friendly room name")
+	roomPassword := flag.String("password", "", "optional room password prompt value for client startup")
 	inviteOut := flag.String("out", "invite.bin", "output invite file path")
 	secretHex := flag.String("room-secret", "", "optional 32-byte room secret in hex")
 	appendBinary := flag.String("append-binary", "", "optional input binary to append invite footer")
@@ -30,8 +32,19 @@ func main() {
 
 	cfg := invite.Config{
 		RelayURL:      *relayURL,
+		RoomName:      *roomName,
 		RoomSecret:    secret,
 		CryptoSuiteID: invite.CryptoSuiteIDV1,
+	}
+	if *roomPassword != "" {
+		passwordSalt, passwordVerifier, err := invite.GeneratePasswordVerifier(*roomPassword)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to derive password verifier: %v\n", err)
+			os.Exit(1)
+		}
+		cfg.PasswordRequired = true
+		cfg.PasswordSalt = passwordSalt
+		cfg.PasswordVerifier = passwordVerifier
 	}
 
 	footer, err := invite.MarshalFooter(cfg)

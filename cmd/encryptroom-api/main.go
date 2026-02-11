@@ -38,6 +38,11 @@ type artifact struct {
 	path     string
 }
 
+type textArtifact struct {
+	filename string
+	content  string
+}
+
 type apiServer struct {
 	projectRoot      string
 	defaultRelayURL  string
@@ -145,6 +150,9 @@ func (s *apiServer) handleCreateBundle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", bundleName))
 	w.Header().Set("X-EncryptRoom-Room-ID", cfg.RoomID)
 	w.Header().Set("X-EncryptRoom-Chat", slug)
+	if cfg.RoomName != "" {
+		w.Header().Set("X-EncryptRoom-Room-Name", cfg.RoomName)
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(bundle)
 }
@@ -188,7 +196,7 @@ func (s *apiServer) generateBundle(ctx context.Context, cfg invite.Config, slug 
 	}
 
 	bundleName := fmt.Sprintf("encryptroom-%s-%s-bundle.zip", slug, cfg.RoomID[:8])
-	zipBytes, err := createZip(artifacts)
+	zipBytes, err := createZip(artifacts, buildInstructionFiles(artifacts, cfg))
 	if err != nil {
 		return nil, "", err
 	}
@@ -212,7 +220,7 @@ func buildClientBinary(ctx context.Context, projectRoot, cacheDir, modCacheDir s
 	return nil
 }
 
-func createZip(artifacts []artifact) ([]byte, error) {
+func createZip(artifacts []artifact, textArtifacts []textArtifact) ([]byte, error) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 
@@ -239,11 +247,85 @@ func createZip(artifacts []artifact) ([]byte, error) {
 			return nil, closeErr
 		}
 	}
+	for _, textFile := range textArtifacts {
+		w, err := zw.Create(textFile.filename)
+		if err != nil {
+			_ = zw.Close()
+			return nil, err
+		}
+		if _, err := io.WriteString(w, textFile.content); err != nil {
+			_ = zw.Close()
+			return nil, err
+		}
+	}
 
 	if err := zw.Close(); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func buildInstructionFiles(artifacts []artifact, cfg invite.Config) []textArtifact {
+	findBinary := func(suffix string) string {
+		for _, a := range artifacts {
+			if strings.Contains(a.filename, suffix) {
+				return a.filename
+			}
+		}
+		return ""
+	}
+
+	windowsBinary := findBinary("-windows-amd64.exe")
+	macosBinary := findBinary("-darwin-arm64")
+	linuxBinary := findBinary("-linux-amd64")
+
+	roomDisplay := cfg.RoomID
+	if cfg.RoomName != "" {
+		roomDisplay = cfg.RoomName + " (" + cfg.RoomID + ")"
+	}
+	passwordNote := "No room password is required by this invite."
+	if cfg.PasswordRequired {
+		passwordNote = "When prompted, enter the room password that was set when this bundle was created."
+	}
+
+	common := "Room: " + roomDisplay + "\n" +
+		"Relay: " + cfg.RelayURL + "\n\n" +
+		"Startup prompts:\n" +
+		"1. Display name\n" +
+		"2. Room password (if required)\n\n" +
+		passwordNote + "\n\n"
+
+	windowsInstructions := common +
+		"Windows (PowerShell):\n" +
+		"  .\\" + windowsBinary + "\n\n" +
+		"Windows (cmd.exe):\n" +
+		"  " + windowsBinary + "\n"
+
+	macosInstructions := common +
+		"macOS (Terminal):\n" +
+		"  chmod +x " + macosBinary + "\n" +
+		"  ./" + macosBinary + "\n"
+
+	linuxInstructions := common +
+		"Linux (terminal):\n" +
+		"  chmod +x " + linuxBinary + "\n" +
+		"  ./" + linuxBinary + "\n"
+
+	readme := "EncryptRoom bundle contents:\n\n" +
+		"- " + windowsBinary + " (Windows)\n" +
+		"- " + macosBinary + " (macOS)\n" +
+		"- " + linuxBinary + " (Linux)\n" +
+		"- RUN-WINDOWS.txt\n" +
+		"- RUN-MACOS.txt\n" +
+		"- RUN-LINUX.txt\n\n" +
+		"Each binary contains the embedded invite for this room.\n"
+
+	return []textArtifact{
+		{filename: "README.txt", content: readme},
+		{filename: "RUN-WINDOWS.txt", content: windowsInstructions},
+		{filename: "RUN-MACOS.txt", content: macosInstructions},
+		{filename: "RUN-LINUX.txt", content: linuxInstructions},
+	}
 }
 
 func decodeJSONBody(r io.Reader, dst any) error {

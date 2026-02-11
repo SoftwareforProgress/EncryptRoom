@@ -56,11 +56,19 @@ func BuildInviteConfig(req BundleRequest, defaultRelayURL string) (invite.Config
 	if err != nil {
 		return invite.Config{}, "", err
 	}
+	passwordSalt, passwordVerifier, err := invite.GeneratePasswordVerifier(req.Password)
+	if err != nil {
+		return invite.Config{}, "", err
+	}
 
 	cfg := invite.Config{
-		RelayURL:      relayURL,
-		RoomSecret:    secret,
-		CryptoSuiteID: invite.CryptoSuiteIDV1,
+		RelayURL:         relayURL,
+		RoomSecret:       secret,
+		RoomName:         chatName,
+		CryptoSuiteID:    invite.CryptoSuiteIDV1,
+		PasswordRequired: true,
+		PasswordSalt:     passwordSalt,
+		PasswordVerifier: passwordVerifier,
 	}
 
 	// Parse what we just marshaled to guarantee normalized fields are populated and valid.

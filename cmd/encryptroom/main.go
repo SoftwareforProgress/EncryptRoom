@@ -66,6 +66,12 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if cfg.RequiresPassword() {
+		if err := promptAndVerifyPassword(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "password verification failed: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	lines := make(chan string, 64)
 	go scanInput(lines)
@@ -132,6 +138,23 @@ func promptDisplayName() (string, error) {
 	}
 }
 
+func promptAndVerifyPassword(cfg invite.Config) error {
+	reader := bufio.NewReader(os.Stdin)
+	for attempts := 0; attempts < 3; attempts++ {
+		fmt.Print("Room password: ")
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		password := strings.TrimRight(line, "\r\n")
+		if cfg.VerifyPassword(password) {
+			return nil
+		}
+		fmt.Fprintln(os.Stderr, "invalid room password")
+	}
+	return errors.New("too many failed attempts")
+}
+
 func scanInput(out chan<- string) {
 	defer close(out)
 	scanner := bufio.NewScanner(os.Stdin)
@@ -155,7 +178,11 @@ func runConnection(addr string, cfg invite.Config, displayName string, lines <-c
 	if err := authenticate(conn, cfg.RoomID, cfg.RoomSecret); err != nil {
 		return err
 	}
-	fmt.Printf("connected to room %s via %s\n", cfg.RoomID, cfg.RelayURL)
+	roomLabel := cfg.RoomID
+	if cfg.RoomName != "" {
+		roomLabel = fmt.Sprintf("%s (%s)", cfg.RoomName, cfg.RoomID)
+	}
+	fmt.Printf("connected to room %s via %s\n", roomLabel, cfg.RelayURL)
 	_ = sendPresence(conn, session, displayName, messageTypePresenceJoin)
 
 	readErr := make(chan error, 1)
@@ -191,8 +218,6 @@ func runConnection(addr string, cfg invite.Config, displayName string, lines <-c
 			if err := sendPayload(conn, session, payload); err != nil {
 				return err
 			}
-
-			fmt.Printf("[%s] %s: %s\n", time.Now().Format("15:04:05"), displayName, line)
 		}
 	}
 }

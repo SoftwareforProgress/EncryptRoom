@@ -7,6 +7,7 @@ EncryptRoom is a presence-based encrypted chat over an untrusted relay.
 - Relay cannot decrypt chat payloads without the room secret.
 - Relay only forwards opaque ciphertext and keeps no message history.
 - User display names and messages are only inside encrypted payloads.
+- Room password verification is local client-side only and is not sent to the relay.
 
 ## What this does not protect
 

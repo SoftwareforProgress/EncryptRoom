@@ -50,6 +50,18 @@ func TestBuildInviteConfigUniqueRoomIDs(t *testing.T) {
 	if cfg1.CryptoSuiteID == "" {
 		t.Fatal("missing crypto suite id")
 	}
+	if cfg1.RoomName != req.ChatName {
+		t.Fatalf("room name mismatch: got %q want %q", cfg1.RoomName, req.ChatName)
+	}
+	if !cfg1.PasswordRequired {
+		t.Fatal("expected password to be required")
+	}
+	if !cfg1.VerifyPassword(req.Password) {
+		t.Fatal("expected password verification to succeed")
+	}
+	if cfg1.VerifyPassword("wrong-password") {
+		t.Fatal("expected wrong password verification to fail")
+	}
 }
 
 func TestSlug(t *testing.T) {

@@ -3,14 +3,17 @@ package invite
 import (
 	"bytes"
 	"crypto/hkdf"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 
 	roomcrypto "github.com/fyroc/encryptroom/internal/crypto"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -22,8 +25,10 @@ const (
 	PayloadVersion  = byte(1)
 	CryptoSuiteIDV1 = "X25519+HKDF-SHA256+ChaCha20-Poly1305-v1"
 
-	saltSize  = 16
-	nonceSize = chacha20poly1305.NonceSize
+	saltSize             = 16
+	nonceSize            = chacha20poly1305.NonceSize
+	passwordSaltSize     = 16
+	passwordVerifierSize = 32
 )
 
 var (
@@ -34,22 +39,61 @@ var (
 
 // Config is the room configuration carried by an invite.
 type Config struct {
-	RelayURL      string
-	RoomID        string
-	RoomSecret    [roomcrypto.RoomSecretSize]byte
-	CryptoSuiteID string
+	RelayURL         string
+	RoomID           string
+	RoomName         string
+	RoomSecret       [roomcrypto.RoomSecretSize]byte
+	CryptoSuiteID    string
+	PasswordRequired bool
+	PasswordSalt     [passwordSaltSize]byte
+	PasswordVerifier [passwordVerifierSize]byte
 }
 
 type payloadPlaintext struct {
-	RelayURL      string `json:"relay_url"`
-	RoomID        string `json:"room_id"`
-	CryptoSuiteID string `json:"crypto_suite_id"`
+	RelayURL         string `json:"relay_url"`
+	RoomID           string `json:"room_id"`
+	RoomName         string `json:"room_name,omitempty"`
+	CryptoSuiteID    string `json:"crypto_suite_id"`
+	PasswordRequired bool   `json:"password_required,omitempty"`
+	PasswordSalt     string `json:"password_salt,omitempty"`
+	PasswordVerifier string `json:"password_verifier,omitempty"`
 }
 
 func GenerateRoomSecret() ([roomcrypto.RoomSecretSize]byte, error) {
 	var secret [roomcrypto.RoomSecretSize]byte
 	_, err := rand.Read(secret[:])
 	return secret, err
+}
+
+func GeneratePasswordVerifier(password string) ([passwordSaltSize]byte, [passwordVerifierSize]byte, error) {
+	if password == "" {
+		return [passwordSaltSize]byte{}, [passwordVerifierSize]byte{}, errors.New("password cannot be empty")
+	}
+
+	var salt [passwordSaltSize]byte
+	if _, err := rand.Read(salt[:]); err != nil {
+		return [passwordSaltSize]byte{}, [passwordVerifierSize]byte{}, err
+	}
+	verifier, err := derivePasswordVerifier(password, salt)
+	if err != nil {
+		return [passwordSaltSize]byte{}, [passwordVerifierSize]byte{}, err
+	}
+	return salt, verifier, nil
+}
+
+func (c Config) RequiresPassword() bool {
+	return c.PasswordRequired
+}
+
+func (c Config) VerifyPassword(password string) bool {
+	if !c.PasswordRequired {
+		return true
+	}
+	derived, err := derivePasswordVerifier(password, c.PasswordSalt)
+	if err != nil {
+		return false
+	}
+	return hmac.Equal(derived[:], c.PasswordVerifier[:])
 }
 
 func MarshalFooter(cfg Config) ([]byte, error) {
@@ -163,6 +207,8 @@ func writeInviteToFile(path string, cfg Config) error {
 }
 
 func normalizeConfig(cfg Config) (Config, error) {
+	cfg.RoomName = strings.TrimSpace(cfg.RoomName)
+
 	if cfg.RelayURL == "" {
 		return Config{}, fmt.Errorf("%w: relay_url is required", ErrInviteInvalidPayload)
 	}
@@ -186,6 +232,10 @@ func normalizeConfig(cfg Config) (Config, error) {
 	if cfg.CryptoSuiteID != CryptoSuiteIDV1 {
 		return Config{}, fmt.Errorf("%w: unsupported crypto suite", ErrInviteInvalidPayload)
 	}
+	if !cfg.PasswordRequired {
+		cfg.PasswordSalt = [passwordSaltSize]byte{}
+		cfg.PasswordVerifier = [passwordVerifierSize]byte{}
+	}
 	return cfg, nil
 }
 
@@ -193,7 +243,13 @@ func marshalPayload(cfg Config) ([]byte, error) {
 	plain := payloadPlaintext{
 		RelayURL:      cfg.RelayURL,
 		RoomID:        cfg.RoomID,
+		RoomName:      cfg.RoomName,
 		CryptoSuiteID: cfg.CryptoSuiteID,
+	}
+	if cfg.PasswordRequired {
+		plain.PasswordRequired = true
+		plain.PasswordSalt = base64.StdEncoding.EncodeToString(cfg.PasswordSalt[:])
+		plain.PasswordVerifier = base64.StdEncoding.EncodeToString(cfg.PasswordVerifier[:])
 	}
 	plainBytes, err := json.Marshal(plain)
 	if err != nil {
@@ -269,11 +325,26 @@ func parsePayload(payload []byte) (Config, error) {
 	}
 
 	cfg := Config{
-		RelayURL:      parsed.RelayURL,
-		RoomID:        parsed.RoomID,
-		RoomSecret:    secret,
-		CryptoSuiteID: parsed.CryptoSuiteID,
+		RelayURL:         parsed.RelayURL,
+		RoomID:           parsed.RoomID,
+		RoomName:         parsed.RoomName,
+		RoomSecret:       secret,
+		CryptoSuiteID:    parsed.CryptoSuiteID,
+		PasswordRequired: parsed.PasswordRequired,
 	}
+	if parsed.PasswordRequired {
+		decodedSalt, err := base64.StdEncoding.DecodeString(parsed.PasswordSalt)
+		if err != nil || len(decodedSalt) != passwordSaltSize {
+			return Config{}, fmt.Errorf("%w: invalid password_salt", ErrInviteInvalidPayload)
+		}
+		decodedVerifier, err := base64.StdEncoding.DecodeString(parsed.PasswordVerifier)
+		if err != nil || len(decodedVerifier) != passwordVerifierSize {
+			return Config{}, fmt.Errorf("%w: invalid password_verifier", ErrInviteInvalidPayload)
+		}
+		copy(cfg.PasswordSalt[:], decodedSalt)
+		copy(cfg.PasswordVerifier[:], decodedVerifier)
+	}
+
 	cfg, err = normalizeConfig(cfg)
 	if err != nil {
 		return Config{}, err
@@ -283,6 +354,16 @@ func parsePayload(payload []byte) (Config, error) {
 
 func deriveInviteKey(roomSecret, salt []byte) ([]byte, error) {
 	return hkdf.Key(sha256.New, roomSecret, salt, "encryptroom/invite-key/v1", chacha20poly1305.KeySize)
+}
+
+func derivePasswordVerifier(password string, salt [passwordSaltSize]byte) ([passwordVerifierSize]byte, error) {
+	verifierBytes, err := hkdf.Key(sha256.New, []byte(password), salt[:], "encryptroom/password-verifier/v1", passwordVerifierSize)
+	if err != nil {
+		return [passwordVerifierSize]byte{}, err
+	}
+	var verifier [passwordVerifierSize]byte
+	copy(verifier[:], verifierBytes)
+	return verifier, nil
 }
 
 func buildAAD(roomSecret, salt, nonce []byte) []byte {

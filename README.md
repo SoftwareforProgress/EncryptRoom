@@ -91,8 +91,10 @@ Payload contains room secret plus encrypted+authenticated config fields:
 
 - `relay_url`
 - `room_id`
+- `room_name` (for display in client connect banner)
 - `room_secret`
 - `crypto_suite_id`
+- `password_required` + salted password verifier metadata (for local password prompt/verification)
 
 For development, client can load an external invite file (`-invite-file`).
 
@@ -126,6 +128,7 @@ The zip contains:
 - Windows client binary (`.exe`)
 - macOS client binary
 - Linux client binary
+- `README.txt`, `RUN-WINDOWS.txt`, `RUN-MACOS.txt`, and `RUN-LINUX.txt` with per-OS run steps
 
 Each binary has the invite embedded in its footer, so “possession equals access”.
 
@@ -154,7 +157,8 @@ URL.revokeObjectURL(href);
 
 ### 5. Run client from extracted binary
 
-Start the binary and enter display name; it connects to the relay using embedded invite data.
+Start the binary and enter display name. If the invite was created via API, it then prompts for the room password used in API creation.
+On success it connects and shows the room name from the invite (for example: `friends-night (room_id)`).
 Peers receive encrypted presence notices when a client joins or gracefully exits (`Ctrl+C`, `/exit`, `/quit`).
 
 ### 6. Alternative dev mode (external invite file)
