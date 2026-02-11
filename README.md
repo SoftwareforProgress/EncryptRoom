@@ -72,9 +72,11 @@ See `SECURITY.md` for details.
 - `/cmd/encryptroom`: terminal client
 - `/cmd/encryptroom-relay`: untrusted relay
 - `/cmd/encryptroom-invite`: dev invite generator / embed helper
+- `/cmd/encryptroom-api`: HTTP API for creating downloadable room bundles
 - `/internal/crypto`: room/message crypto APIs
 - `/internal/invite`: invite payload/footer parsing and writing
 - `/internal/protocol`: handshake control protocol
+- `/internal/provision`: API provisioning helpers (room secret/id generation + validation)
 
 ## Invite format
 
@@ -102,21 +104,69 @@ For development, client can load an external invite file (`-invite-file`).
 go run ./cmd/encryptroom-relay -listen :8080
 ```
 
-### 2. Generate invite (dev)
+### 2. Run API server for React app bundle generation
+
+```bash
+go run ./cmd/encryptroom-api \
+  -listen :8090 \
+  -relay-url tcp://127.0.0.1:8080
+```
+
+### 3. Create/download a 3-binary bundle via API
+
+```bash
+curl -X POST http://127.0.0.1:8090/api/v1/bundles \
+  -H 'Content-Type: application/json' \
+  -d '{"chat_name":"friends-night","password":"correct horse battery staple"}' \
+  --output encryptroom-bundle.zip
+```
+
+The zip contains:
+
+- Windows client binary (`.exe`)
+- macOS client binary
+- Linux client binary
+
+Each binary has the invite embedded in its footer, so “possession equals access”.
+
+### 4. React usage example
+
+```ts
+const res = await fetch("http://127.0.0.1:8090/api/v1/bundles", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    chat_name: "friends-night",
+    password: "correct horse battery staple",
+    // relay_url is optional if API server has -relay-url default
+  }),
+});
+
+if (!res.ok) throw new Error("Failed to create room bundle");
+const blob = await res.blob();
+const href = URL.createObjectURL(blob);
+const a = document.createElement("a");
+a.href = href;
+a.download = "encryptroom-bundle.zip";
+a.click();
+URL.revokeObjectURL(href);
+```
+
+### 5. Run client from extracted binary
+
+Start the binary and enter display name; it connects to the relay using embedded invite data.
+Peers receive encrypted presence notices when a client joins or gracefully exits (`Ctrl+C`, `/exit`, `/quit`).
+
+### 6. Alternative dev mode (external invite file)
 
 ```bash
 go run ./cmd/encryptroom-invite -relay-url tcp://127.0.0.1:8080 -out invite.bin
-```
-
-### 3. Run client in dev mode (external invite)
-
-```bash
 go run ./cmd/encryptroom -invite-file invite.bin
 ```
 
 Run in a second terminal with the same invite to chat in the same room.
 
-### 4. Build shipping binary with embedded invite
+### 7. Manual single binary embedding (without API)
 
 ```bash
 go build -o encryptroom ./cmd/encryptroom

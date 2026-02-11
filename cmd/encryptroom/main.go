@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	roomcrypto "github.com/fyroc/encryptroom/internal/crypto"
@@ -19,8 +21,16 @@ import (
 )
 
 var errInputClosed = errors.New("input closed")
+var errUserExit = errors.New("user exit")
+
+const (
+	messageTypeChat          = "chat"
+	messageTypePresenceJoin  = "presence_join"
+	messageTypePresenceLeave = "presence_leave"
+)
 
 type chatPayload struct {
+	Type        string `json:"type,omitempty"`
 	DisplayName string `json:"display_name"`
 	Body        string `json:"body"`
 	SentAtUnix  int64  `json:"sent_at_unix"`
@@ -60,9 +70,18 @@ func main() {
 	lines := make(chan string, 64)
 	go scanInput(lines)
 
+	quit := make(chan struct{})
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		<-sigCh
+		close(quit)
+	}()
+
 	for {
-		err := runConnection(addr, cfg, displayName, lines)
-		if errors.Is(err, errInputClosed) {
+		err := runConnection(addr, cfg, displayName, lines, quit)
+		if errors.Is(err, errInputClosed) || errors.Is(err, errUserExit) {
 			return
 		}
 		fmt.Fprintf(os.Stderr, "disconnected (%v), reconnecting in %s...\n", err, reconnectDelay.String())
@@ -121,7 +140,7 @@ func scanInput(out chan<- string) {
 	}
 }
 
-func runConnection(addr string, cfg invite.Config, displayName string, lines <-chan string) error {
+func runConnection(addr string, cfg invite.Config, displayName string, lines <-chan string, quit <-chan struct{}) error {
 	session, err := roomcrypto.NewSession(cfg.RoomSecret[:])
 	if err != nil {
 		return err
@@ -137,38 +156,39 @@ func runConnection(addr string, cfg invite.Config, displayName string, lines <-c
 		return err
 	}
 	fmt.Printf("connected to room %s via %s\n", cfg.RoomID, cfg.RelayURL)
+	_ = sendPresence(conn, session, displayName, messageTypePresenceJoin)
 
 	readErr := make(chan error, 1)
 	go readMessages(conn, session, readErr)
 
 	for {
 		select {
+		case <-quit:
+			_ = sendPresence(conn, session, displayName, messageTypePresenceLeave)
+			return errUserExit
 		case err := <-readErr:
 			return err
 		case line, ok := <-lines:
 			if !ok {
+				_ = sendPresence(conn, session, displayName, messageTypePresenceLeave)
 				return errInputClosed
 			}
 			line = strings.TrimSpace(line)
 			if line == "" {
 				continue
 			}
+			if strings.EqualFold(line, "/exit") || strings.EqualFold(line, "/quit") {
+				_ = sendPresence(conn, session, displayName, messageTypePresenceLeave)
+				return errUserExit
+			}
 
 			payload := chatPayload{
+				Type:        messageTypeChat,
 				DisplayName: displayName,
 				Body:        line,
 				SentAtUnix:  time.Now().Unix(),
 			}
-			plain, err := json.Marshal(payload)
-			if err != nil {
-				return err
-			}
-
-			encrypted, err := session.Encrypt(plain)
-			if err != nil {
-				return err
-			}
-			if err := protocol.WriteFrame(conn, protocol.FrameTypeCiphertext, encrypted); err != nil {
+			if err := sendPayload(conn, session, payload); err != nil {
 				return err
 			}
 
@@ -202,8 +222,38 @@ func readMessages(conn net.Conn, session *roomcrypto.Session, errs chan<- error)
 		}
 
 		ts := time.Unix(msg.SentAtUnix, 0).Format("15:04:05")
-		fmt.Printf("[%s] %s: %s\n", ts, msg.DisplayName, msg.Body)
+		switch msg.Type {
+		case messageTypePresenceJoin:
+			fmt.Printf("[%s] %s has entered chat\n", ts, msg.DisplayName)
+		case messageTypePresenceLeave:
+			fmt.Printf("[%s] %s has closed the chat\n", ts, msg.DisplayName)
+		default:
+			fmt.Printf("[%s] %s: %s\n", ts, msg.DisplayName, msg.Body)
+		}
 	}
+}
+
+func sendPresence(conn net.Conn, session *roomcrypto.Session, displayName, eventType string) error {
+	payload := chatPayload{
+		Type:        eventType,
+		DisplayName: displayName,
+		Body:        "",
+		SentAtUnix:  time.Now().Unix(),
+	}
+	return sendPayload(conn, session, payload)
+}
+
+func sendPayload(conn net.Conn, session *roomcrypto.Session, payload chatPayload) error {
+	plain, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	encrypted, err := session.Encrypt(plain)
+	if err != nil {
+		return err
+	}
+	return protocol.WriteFrame(conn, protocol.FrameTypeCiphertext, encrypted)
 }
 
 func authenticate(conn net.Conn, roomID string, roomSecret [32]byte) error {

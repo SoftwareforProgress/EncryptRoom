@@ -14,6 +14,7 @@ EncryptRoom is a presence-based encrypted chat over an untrusted relay.
 - Group membership changes are not retroactive: removing a participant requires rotating to a new invite/room secret.
 - Relay compromise still enables denial-of-service, connection disruption, and traffic analysis (timing/volume metadata).
 - Network-level observers can still see that a client connects to the relay.
+- If you run the bundle-generation API, that API process sees chat name/password inputs at creation time. It should avoid request logging and run in a trusted environment.
 
 ## Replay and session notes
 
