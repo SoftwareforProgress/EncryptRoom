@@ -40,6 +40,7 @@ See `SECURITY.md` for details.
 - Client derives `room_auth_verifier = HMAC-SHA256(room_secret, "encryptroom/relay-auth/v1")`.
 - Relay sends random challenge.
 - Client returns `HMAC-SHA256(room_auth_verifier, challenge)`.
+- Relay requests/verifies room verifier only when a room is first created in memory; normal joins use challenge-response without sending a reusable verifier.
 - Relay verifies using room verifier it tracks in-memory per room.
 
 ### Message encryption
@@ -47,6 +48,7 @@ See `SECURITY.md` for details.
 - Sender uses one ephemeral X25519 keypair per process session.
 - Session subkey derived with X25519 + HKDF-SHA256.
 - Payload encrypted with ChaCha20-Poly1305.
+- Message nonce is deterministic from the per-sender monotonic counter (no nonce reuse under one sender session key).
 - Each message includes:
   - version
   - sender ephemeral public key
@@ -77,6 +79,11 @@ See `SECURITY.md` for details.
 - `/internal/invite`: invite payload/footer parsing and writing
 - `/internal/protocol`: handshake control protocol
 - `/internal/provision`: API provisioning helpers (room secret/id generation + validation)
+
+Security-focused tests cover:
+- crypto tamper/replay/malformed-frame handling
+- protocol frame size enforcement
+- relay authentication checks and opaque ciphertext forwarding behavior
 
 ## Invite format
 

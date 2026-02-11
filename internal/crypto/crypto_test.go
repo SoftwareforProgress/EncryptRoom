@@ -76,3 +76,75 @@ func TestDecryptRejectsTamper(t *testing.T) {
 		t.Fatal("expected auth failure on tampered ciphertext")
 	}
 }
+
+func TestDecryptRejectsHeaderTamper(t *testing.T) {
+	secret := make([]byte, 32)
+	for i := range secret {
+		secret[i] = byte(i + 1)
+	}
+
+	sender, err := NewSession(secret)
+	if err != nil {
+		t.Fatalf("NewSession(sender): %v", err)
+	}
+	receiver, err := NewSession(secret)
+	if err != nil {
+		t.Fatalf("NewSession(receiver): %v", err)
+	}
+
+	ciphertext, err := sender.Encrypt([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	// Tamper counter bytes in the authenticated header.
+	ciphertext[1+SenderPublicKeySize] ^= 0x01
+	if _, _, _, err := receiver.Decrypt(ciphertext); err == nil {
+		t.Fatal("expected auth failure on tampered header")
+	}
+}
+
+func TestDecryptRejectsMalformedFrames(t *testing.T) {
+	secret := make([]byte, 32)
+	for i := range secret {
+		secret[i] = byte(i + 1)
+	}
+
+	session, err := NewSession(secret)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	if _, _, _, err := session.Decrypt([]byte{1, 2, 3}); !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("expected ErrInvalidMessage, got %v", err)
+	}
+
+	msg, err := session.Encrypt([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	msg[0] = 0x99
+	if _, _, _, err := session.Decrypt(msg); !errors.Is(err, ErrUnsupportedVersion) {
+		t.Fatalf("expected ErrUnsupportedVersion, got %v", err)
+	}
+}
+
+func TestEncryptCounterExhausted(t *testing.T) {
+	secret := make([]byte, 32)
+	for i := range secret {
+		secret[i] = byte(i + 1)
+	}
+
+	session, err := NewSession(secret)
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	session.mu.Lock()
+	session.sendCounter = ^uint64(0)
+	session.mu.Unlock()
+
+	if _, err := session.Encrypt([]byte("hello")); !errors.Is(err, ErrCounterExhausted) {
+		t.Fatalf("expected ErrCounterExhausted, got %v", err)
+	}
+}

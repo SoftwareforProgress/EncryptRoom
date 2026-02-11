@@ -13,6 +13,7 @@ import (
 const (
 	ProtocolVersion = 1
 	challengeSize   = 32
+	verifierSize    = 32
 
 	FrameTypeHello      byte = 1
 	FrameTypeChallenge  byte = 2
@@ -24,13 +25,17 @@ const (
 	maxFrameSize = 1 << 20 // 1 MiB
 )
 
-var ErrFrameTooLarge = errors.New("frame exceeds max size")
+var (
+	ErrFrameTooLarge       = errors.New("frame exceeds max size")
+	ErrInvalidChallenge    = errors.New("invalid challenge payload")
+	ErrInvalidAuthResponse = errors.New("invalid auth response payload")
+)
 
 // HelloPayload is sent by clients before challenge-response authentication.
 type HelloPayload struct {
 	Proto    int    `json:"proto"`
 	RoomID   string `json:"room_id"`
-	RoomAuth string `json:"room_auth"`
+	RoomAuth string `json:"room_auth,omitempty"`
 }
 
 // DeriveRoomAuthVerifier derives a relay-verifiable room key from the room secret.
@@ -59,6 +64,54 @@ func ComputeChallengeResponse(verifier [32]byte, challenge [challengeSize]byte) 
 func VerifyChallengeResponse(verifier [32]byte, challenge [challengeSize]byte, response [32]byte) bool {
 	expected := ComputeChallengeResponse(verifier, challenge)
 	return hmac.Equal(expected[:], response[:])
+}
+
+func EncodeChallenge(challenge [challengeSize]byte, requireVerifier bool) []byte {
+	payload := make([]byte, 1+challengeSize)
+	if requireVerifier {
+		payload[0] = 1
+	}
+	copy(payload[1:], challenge[:])
+	return payload
+}
+
+func DecodeChallenge(payload []byte) ([challengeSize]byte, bool, error) {
+	var challenge [challengeSize]byte
+	if len(payload) != 1+challengeSize {
+		return challenge, false, ErrInvalidChallenge
+	}
+	requireVerifier := payload[0] == 1
+	copy(challenge[:], payload[1:])
+	return challenge, requireVerifier, nil
+}
+
+func EncodeAuthResponse(response [challengeSize]byte, verifier *[verifierSize]byte) []byte {
+	if verifier == nil {
+		payload := make([]byte, challengeSize)
+		copy(payload, response[:])
+		return payload
+	}
+
+	payload := make([]byte, challengeSize+verifierSize)
+	copy(payload[:challengeSize], response[:])
+	copy(payload[challengeSize:], verifier[:])
+	return payload
+}
+
+func DecodeAuthResponse(payload []byte) ([challengeSize]byte, *[verifierSize]byte, error) {
+	var response [challengeSize]byte
+	switch len(payload) {
+	case challengeSize:
+		copy(response[:], payload)
+		return response, nil, nil
+	case challengeSize + verifierSize:
+		copy(response[:], payload[:challengeSize])
+		var verifier [verifierSize]byte
+		copy(verifier[:], payload[challengeSize:])
+		return response, &verifier, nil
+	default:
+		return response, nil, ErrInvalidAuthResponse
+	}
 }
 
 func WriteFrame(w io.Writer, frameType byte, payload []byte) error {

@@ -1,15 +1,14 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/fyroc/encryptroom/internal/protocol"
 )
@@ -32,6 +31,12 @@ type clientConn struct {
 	closed chan struct{}
 	once   sync.Once
 }
+
+const (
+	handshakeTimeout = 15 * time.Second
+	readIdleTimeout  = 5 * time.Minute
+	writeTimeout     = 10 * time.Second
+)
 
 func main() {
 	listenAddr := flag.String("listen", ":8080", "tcp address to listen on")
@@ -56,14 +61,13 @@ func main() {
 }
 
 func (r *relayServer) handleConn(conn net.Conn) {
-	roomID, verifier, created, err := r.authenticate(conn)
+	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
+	roomID, verifier, err := r.authenticate(conn)
 	if err != nil {
-		if created {
-			r.cleanupRoomIfUnused(roomID)
-		}
 		_ = conn.Close()
 		return
 	}
+	_ = conn.SetDeadline(time.Time{})
 
 	c := &clientConn{
 		conn:   conn,
@@ -81,100 +85,87 @@ func (r *relayServer) handleConn(conn net.Conn) {
 	c.readLoop()
 }
 
-func (r *relayServer) authenticate(conn net.Conn) (string, [32]byte, bool, error) {
+func (r *relayServer) authenticate(conn net.Conn) (string, [32]byte, error) {
 	frameType, payload, err := protocol.ReadFrame(conn)
 	if err != nil {
-		return "", [32]byte{}, false, err
+		return "", [32]byte{}, err
 	}
 	if frameType != protocol.FrameTypeHello {
 		_ = writeAuthError(conn, "expected hello")
-		return "", [32]byte{}, false, errors.New("expected hello")
+		return "", [32]byte{}, errors.New("expected hello")
 	}
 
 	var hello protocol.HelloPayload
 	if err := json.Unmarshal(payload, &hello); err != nil {
 		_ = writeAuthError(conn, "invalid hello")
-		return "", [32]byte{}, false, errors.New("invalid hello")
+		return "", [32]byte{}, errors.New("invalid hello")
 	}
-	if hello.Proto != protocol.ProtocolVersion || hello.RoomID == "" || hello.RoomAuth == "" {
+	if hello.Proto != protocol.ProtocolVersion || hello.RoomID == "" {
 		_ = writeAuthError(conn, "invalid hello")
-		return "", [32]byte{}, false, errors.New("invalid hello")
+		return "", [32]byte{}, errors.New("invalid hello")
 	}
 
-	decodedVerifier, err := base64.StdEncoding.DecodeString(hello.RoomAuth)
-	if err != nil || len(decodedVerifier) != 32 {
-		_ = writeAuthError(conn, "invalid verifier")
-		return hello.RoomID, [32]byte{}, false, errors.New("invalid verifier")
-	}
-	var verifier [32]byte
-	copy(verifier[:], decodedVerifier)
-
-	created, err := r.ensureRoomVerifier(hello.RoomID, verifier)
-	if err != nil {
-		_ = writeAuthError(conn, "room auth mismatch")
-		return hello.RoomID, verifier, false, err
-	}
+	verifier, exists := r.getRoomVerifier(hello.RoomID)
+	requireVerifier := !exists
 
 	challenge, err := protocol.NewChallenge()
 	if err != nil {
 		_ = writeAuthError(conn, "internal error")
-		return hello.RoomID, verifier, created, err
+		return hello.RoomID, verifier, err
 	}
-	if err := protocol.WriteFrame(conn, protocol.FrameTypeChallenge, challenge[:]); err != nil {
-		return hello.RoomID, verifier, created, err
+	challengePayload := protocol.EncodeChallenge(challenge, requireVerifier)
+	if err := protocol.WriteFrame(conn, protocol.FrameTypeChallenge, challengePayload); err != nil {
+		return hello.RoomID, verifier, err
 	}
 
 	frameType, payload, err = protocol.ReadFrame(conn)
 	if err != nil {
-		return hello.RoomID, verifier, created, err
+		return hello.RoomID, verifier, err
 	}
-	if frameType != protocol.FrameTypeAuth || len(payload) != 32 {
+	if frameType != protocol.FrameTypeAuth {
 		_ = writeAuthError(conn, "invalid auth")
-		return hello.RoomID, verifier, created, errors.New("invalid auth")
+		return hello.RoomID, verifier, errors.New("invalid auth")
 	}
 
-	var response [32]byte
-	copy(response[:], payload)
+	response, authVerifier, err := protocol.DecodeAuthResponse(payload)
+	if err != nil {
+		_ = writeAuthError(conn, "invalid auth payload")
+		return hello.RoomID, verifier, err
+	}
+	if requireVerifier {
+		if authVerifier == nil {
+			_ = writeAuthError(conn, "room verifier required")
+			return hello.RoomID, verifier, errors.New("missing room verifier")
+		}
+		verifier = *authVerifier
+	} else if authVerifier != nil {
+		_ = writeAuthError(conn, "unexpected room verifier")
+		return hello.RoomID, verifier, errors.New("unexpected room verifier")
+	}
+
 	if !protocol.VerifyChallengeResponse(verifier, challenge, response) {
 		_ = writeAuthError(conn, "auth failed")
-		return hello.RoomID, verifier, created, errors.New("auth failed")
+		return hello.RoomID, verifier, errors.New("auth failed")
 	}
 
 	if err := protocol.WriteFrame(conn, protocol.FrameTypeAuthOK, nil); err != nil {
-		return hello.RoomID, verifier, created, err
+		return hello.RoomID, verifier, err
 	}
-	return hello.RoomID, verifier, created, nil
+	return hello.RoomID, verifier, nil
 }
 
 func writeAuthError(w io.Writer, message string) error {
 	return protocol.WriteFrame(w, protocol.FrameTypeAuthError, []byte(message))
 }
 
-func (r *relayServer) ensureRoomVerifier(roomID string, verifier [32]byte) (bool, error) {
+func (r *relayServer) getRoomVerifier(roomID string) ([32]byte, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
 	room, ok := r.rooms[roomID]
 	if !ok {
-		r.rooms[roomID] = &roomState{
-			verifier: verifier,
-			clients:  make(map[*clientConn]struct{}),
-		}
-		return true, nil
+		return [32]byte{}, false
 	}
-	if room.verifier != verifier {
-		return false, fmt.Errorf("room verifier mismatch")
-	}
-	return false, nil
-}
-
-func (r *relayServer) cleanupRoomIfUnused(roomID string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	room, ok := r.rooms[roomID]
-	if ok && len(room.clients) == 0 {
-		delete(r.rooms, roomID)
-	}
+	return room.verifier, true
 }
 
 func (r *relayServer) register(c *clientConn, verifier [32]byte) error {
@@ -234,12 +225,13 @@ func (r *relayServer) broadcast(sender *clientConn, msg []byte) {
 func (c *clientConn) readLoop() {
 	defer c.close()
 	for {
+		_ = c.conn.SetReadDeadline(time.Now().Add(readIdleTimeout))
 		frameType, payload, err := protocol.ReadFrame(c.conn)
 		if err != nil {
 			return
 		}
 		if frameType != protocol.FrameTypeCiphertext {
-			continue
+			return
 		}
 		c.relay.broadcast(c, payload)
 	}
@@ -251,6 +243,7 @@ func (c *clientConn) writeLoop() {
 		case <-c.closed:
 			return
 		case msg := <-c.send:
+			_ = c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 			if err := protocol.WriteFrame(c.conn, protocol.FrameTypeCiphertext, msg); err != nil {
 				c.close()
 				return

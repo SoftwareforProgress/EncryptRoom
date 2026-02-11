@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -285,9 +284,8 @@ func authenticate(conn net.Conn, roomID string, roomSecret [32]byte) error {
 	verifier := protocol.DeriveRoomAuthVerifier(roomSecret)
 
 	hello := protocol.HelloPayload{
-		Proto:    protocol.ProtocolVersion,
-		RoomID:   roomID,
-		RoomAuth: base64.StdEncoding.EncodeToString(verifier[:]),
+		Proto:  protocol.ProtocolVersion,
+		RoomID: roomID,
 	}
 	helloBytes, err := json.Marshal(hello)
 	if err != nil {
@@ -304,14 +302,23 @@ func authenticate(conn net.Conn, roomID string, roomSecret [32]byte) error {
 	if frameType == protocol.FrameTypeAuthError {
 		return errors.New(string(payload))
 	}
-	if frameType != protocol.FrameTypeChallenge || len(payload) != 32 {
+	if frameType != protocol.FrameTypeChallenge {
 		return errors.New("relay did not return a valid challenge")
 	}
 
-	var challenge [32]byte
-	copy(challenge[:], payload)
+	challenge, requireVerifier, err := protocol.DecodeChallenge(payload)
+	if err != nil {
+		return err
+	}
 	response := protocol.ComputeChallengeResponse(verifier, challenge)
-	if err := protocol.WriteFrame(conn, protocol.FrameTypeAuth, response[:]); err != nil {
+
+	var authPayload []byte
+	if requireVerifier {
+		authPayload = protocol.EncodeAuthResponse(response, &verifier)
+	} else {
+		authPayload = protocol.EncodeAuthResponse(response, nil)
+	}
+	if err := protocol.WriteFrame(conn, protocol.FrameTypeAuth, authPayload); err != nil {
 		return err
 	}
 

@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"bytes"
 	"crypto/ecdh"
 	"crypto/hkdf"
 	"crypto/rand"
@@ -16,7 +17,7 @@ import (
 const (
 	RoomSecretSize           = 32
 	SenderPublicKeySize      = 32
-	messageVersion      byte = 1
+	messageVersion      byte = 2
 	nonceSize                = chacha20poly1305.NonceSize
 	headerSize               = 1 + SenderPublicKeySize + 8 + nonceSize
 )
@@ -26,6 +27,7 @@ var (
 	ErrInvalidMessage     = errors.New("invalid encrypted message")
 	ErrUnsupportedVersion = errors.New("unsupported message version")
 	ErrReplayDetected     = errors.New("replay detected")
+	ErrCounterExhausted   = errors.New("message counter exhausted")
 )
 
 // Session owns one ephemeral sender key for the process lifetime and validates replays.
@@ -82,6 +84,9 @@ func (s *Session) Encrypt(plaintext []byte) ([]byte, error) {
 	s.sendCounter++
 	counter := s.sendCounter
 	s.mu.Unlock()
+	if counter == 0 {
+		return nil, ErrCounterExhausted
+	}
 
 	shared, err := s.senderPrivate.ECDH(s.roomPublic)
 	if err != nil {
@@ -98,16 +103,14 @@ func (s *Session) Encrypt(plaintext []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	nonce := make([]byte, nonceSize)
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, err
-	}
+	nonceArr := nonceFromCounter(counter)
+	nonce := nonceArr[:]
 
 	header := make([]byte, headerSize)
 	header[0] = messageVersion
 	copy(header[1:1+SenderPublicKeySize], s.senderPublic[:])
 	binary.BigEndian.PutUint64(header[1+SenderPublicKeySize:1+SenderPublicKeySize+8], counter)
-	copy(header[1+SenderPublicKeySize+8:], nonce)
+	copy(header[1+SenderPublicKeySize+8:], nonceArr[:])
 
 	ciphertext := aead.Seal(nil, nonce, plaintext, header)
 	out := make([]byte, 0, len(header)+len(ciphertext))
@@ -129,6 +132,10 @@ func (s *Session) Decrypt(message []byte) ([]byte, [SenderPublicKeySize]byte, ui
 	copy(sender[:], message[1:1+SenderPublicKeySize])
 	counter := binary.BigEndian.Uint64(message[1+SenderPublicKeySize : 1+SenderPublicKeySize+8])
 	nonce := message[1+SenderPublicKeySize+8 : headerSize]
+	expectedNonce := nonceFromCounter(counter)
+	if !bytes.Equal(nonce, expectedNonce[:]) {
+		return nil, sender, 0, ErrInvalidMessage
+	}
 	header := message[:headerSize]
 	ciphertext := message[headerSize:]
 
@@ -186,4 +193,10 @@ func deriveAEADKey(shared, roomSecret, senderPub []byte) ([]byte, error) {
 	info = append(info, []byte("encryptroom/session-key/v1:")...)
 	info = append(info, senderPub...)
 	return hkdf.Key(sha256.New, shared, roomSecret, string(info), chacha20poly1305.KeySize)
+}
+
+func nonceFromCounter(counter uint64) [nonceSize]byte {
+	var nonce [nonceSize]byte
+	binary.BigEndian.PutUint64(nonce[nonceSize-8:], counter)
+	return nonce
 }
