@@ -1,16 +1,20 @@
 package main
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/fyroc/encryptroom/internal/protocol"
+	"golang.org/x/crypto/acme/autocert"
 )
 
 type roomState struct {
@@ -40,9 +44,23 @@ const (
 
 func main() {
 	listenAddr := flag.String("listen", ":8080", "tcp address to listen on")
+	tlsCertFile := flag.String("tls-cert-file", "", "TLS certificate file path (PEM)")
+	tlsKeyFile := flag.String("tls-key-file", "", "TLS private key file path (PEM)")
+	tlsAutocertDomains := flag.String("tls-autocert-domains", "", "comma-separated domains for Let's Encrypt autocert")
+	tlsAutocertEmail := flag.String("tls-autocert-email", "", "email for Let's Encrypt registration (optional)")
+	tlsAutocertCache := flag.String("tls-autocert-cache", "autocert-cache", "directory for Let's Encrypt cert cache")
+	tlsAutocertHTTPAddr := flag.String("tls-autocert-http-addr", ":80", "HTTP listener for Let's Encrypt HTTP-01 challenge")
 	flag.Parse()
 
-	ln, err := net.Listen("tcp", *listenAddr)
+	ln, transport, err := newRelayListener(
+		*listenAddr,
+		*tlsCertFile,
+		*tlsKeyFile,
+		*tlsAutocertDomains,
+		*tlsAutocertEmail,
+		*tlsAutocertCache,
+		*tlsAutocertHTTPAddr,
+	)
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
@@ -50,7 +68,7 @@ func main() {
 
 	relay := &relayServer{rooms: make(map[string]*roomState)}
 
-	log.Printf("encryptroom-relay listening on %s", *listenAddr)
+	log.Printf("encryptroom-relay listening on %s (%s)", *listenAddr, transport)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -58,6 +76,97 @@ func main() {
 		}
 		go relay.handleConn(conn)
 	}
+}
+
+func newRelayListener(
+	listenAddr string,
+	tlsCertFile string,
+	tlsKeyFile string,
+	tlsAutocertDomains string,
+	tlsAutocertEmail string,
+	tlsAutocertCache string,
+	tlsAutocertHTTPAddr string,
+) (net.Listener, string, error) {
+	domains := splitCSV(tlsAutocertDomains)
+	certConfigured := tlsCertFile != "" || tlsKeyFile != ""
+	autocertConfigured := len(domains) > 0
+
+	if certConfigured && autocertConfigured {
+		return nil, "", errors.New("choose either cert/key TLS or tls-autocert-domains, not both")
+	}
+
+	if certConfigured {
+		if tlsCertFile == "" || tlsKeyFile == "" {
+			return nil, "", errors.New("both -tls-cert-file and -tls-key-file are required")
+		}
+		cert, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
+		if err != nil {
+			return nil, "", err
+		}
+		cfg := &tls.Config{
+			MinVersion:   tls.VersionTLS13,
+			Certificates: []tls.Certificate{cert},
+		}
+		ln, err := tls.Listen("tcp", listenAddr, cfg)
+		if err != nil {
+			return nil, "", err
+		}
+		return ln, "tls(cert)", nil
+	}
+
+	if autocertConfigured {
+		manager := &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			Email:      strings.TrimSpace(tlsAutocertEmail),
+			Cache:      autocert.DirCache(strings.TrimSpace(tlsAutocertCache)),
+			HostPolicy: autocert.HostWhitelist(domains...),
+		}
+
+		httpAddr := strings.TrimSpace(tlsAutocertHTTPAddr)
+		if httpAddr != "" {
+			httpSrv := &http.Server{
+				Addr:              httpAddr,
+				Handler:           manager.HTTPHandler(nil),
+				ReadHeaderTimeout: 5 * time.Second,
+			}
+			go func() {
+				if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					log.Printf("autocert HTTP challenge server stopped: %v", err)
+				}
+			}()
+			log.Printf("autocert HTTP-01 challenge listener on %s", httpAddr)
+		}
+
+		cfg := manager.TLSConfig()
+		cfg.MinVersion = tls.VersionTLS13
+		ln, err := tls.Listen("tcp", listenAddr, cfg)
+		if err != nil {
+			return nil, "", err
+		}
+		return ln, "tls(autocert)", nil
+	}
+
+	ln, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		return nil, "", err
+	}
+	return ln, "tcp", nil
+}
+
+func splitCSV(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		v := strings.TrimSpace(p)
+		if v == "" {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 func (r *relayServer) handleConn(conn net.Conn) {

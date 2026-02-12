@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -17,6 +18,7 @@ import (
 	roomcrypto "github.com/fyroc/encryptroom/internal/crypto"
 	"github.com/fyroc/encryptroom/internal/invite"
 	"github.com/fyroc/encryptroom/internal/protocol"
+	"golang.org/x/term"
 )
 
 var errInputClosed = errors.New("input closed")
@@ -35,6 +37,12 @@ type chatPayload struct {
 	SentAtUnix  int64  `json:"sent_at_unix"`
 }
 
+type relayEndpoint struct {
+	scheme     string
+	address    string
+	serverName string
+}
+
 func main() {
 	invitePath := flag.String("invite-file", "", "path to invite file for development mode")
 	nameFlag := flag.String("name", "", "display name")
@@ -47,15 +55,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "failed to load invite: %v\n", err)
 		os.Exit(1)
 	}
-	if *relayOverride != "" {
-		cfg.RelayURL = *relayOverride
-	}
-
-	addr, err := resolveRelayAddress(cfg.RelayURL)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "invalid relay URL: %v\n", err)
-		os.Exit(1)
-	}
 
 	displayName := strings.TrimSpace(*nameFlag)
 	if displayName == "" {
@@ -66,10 +65,20 @@ func main() {
 		}
 	}
 	if cfg.RequiresPassword() {
-		if err := promptAndVerifyPassword(cfg); err != nil {
+		cfg, err = promptAndUnlockPassword(cfg)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "password verification failed: %v\n", err)
 			os.Exit(1)
 		}
+	}
+	if *relayOverride != "" {
+		cfg.RelayURL = *relayOverride
+	}
+
+	endpoint, err := resolveRelayEndpoint(cfg.RelayURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid relay URL: %v\n", err)
+		os.Exit(1)
 	}
 
 	lines := make(chan string, 64)
@@ -85,7 +94,7 @@ func main() {
 	}()
 
 	for {
-		err := runConnection(addr, cfg, displayName, lines, quit)
+		err := runConnection(endpoint, cfg, displayName, lines, quit)
 		if errors.Is(err, errInputClosed) || errors.Is(err, errUserExit) {
 			return
 		}
@@ -101,24 +110,33 @@ func loadInvite(path string) (invite.Config, error) {
 	return invite.ReadInviteFromFile(path)
 }
 
-func resolveRelayAddress(relayURL string) (string, error) {
+func resolveRelayEndpoint(relayURL string) (relayEndpoint, error) {
 	parsed, err := url.Parse(relayURL)
 	if err != nil {
-		return "", err
+		return relayEndpoint{}, err
 	}
 	switch parsed.Scheme {
 	case "tcp":
 		if parsed.Host == "" {
-			return "", errors.New("missing host")
+			return relayEndpoint{}, errors.New("missing host")
 		}
-		return parsed.Host, nil
+		return relayEndpoint{scheme: "tcp", address: parsed.Host}, nil
+	case "tls":
+		if parsed.Host == "" {
+			return relayEndpoint{}, errors.New("missing host")
+		}
+		serverName := parsed.Hostname()
+		if serverName == "" {
+			return relayEndpoint{}, errors.New("missing tls server name")
+		}
+		return relayEndpoint{scheme: "tls", address: parsed.Host, serverName: serverName}, nil
 	case "":
 		if relayURL == "" {
-			return "", errors.New("empty relay address")
+			return relayEndpoint{}, errors.New("empty relay address")
 		}
-		return relayURL, nil
+		return relayEndpoint{scheme: "tcp", address: relayURL}, nil
 	default:
-		return "", fmt.Errorf("unsupported scheme %q (use tcp://)", parsed.Scheme)
+		return relayEndpoint{}, fmt.Errorf("unsupported scheme %q (use tcp:// or tls://)", parsed.Scheme)
 	}
 }
 
@@ -137,21 +155,41 @@ func promptDisplayName() (string, error) {
 	}
 }
 
-func promptAndVerifyPassword(cfg invite.Config) error {
-	reader := bufio.NewReader(os.Stdin)
+func promptAndUnlockPassword(cfg invite.Config) (invite.Config, error) {
 	for attempts := 0; attempts < 3; attempts++ {
-		fmt.Print("Room password: ")
-		line, err := reader.ReadString('\n')
+		password, err := readPasswordInput()
 		if err != nil {
-			return err
+			return invite.Config{}, err
 		}
-		password := strings.TrimRight(line, "\r\n")
-		if cfg.VerifyPassword(password) {
-			return nil
+		unlocked, err := cfg.UnlockWithPassword(password)
+		if err == nil {
+			return unlocked, nil
+		}
+		if !errors.Is(err, invite.ErrInvalidPassword) {
+			return invite.Config{}, err
 		}
 		fmt.Fprintln(os.Stderr, "invalid room password")
 	}
-	return errors.New("too many failed attempts")
+	return invite.Config{}, errors.New("too many failed attempts")
+}
+
+func readPasswordInput() (string, error) {
+	fmt.Print("Room password: ")
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		b, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		if err != nil {
+			return "", err
+		}
+		return string(b), nil
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(line, "\r\n"), nil
 }
 
 func scanInput(out chan<- string) {
@@ -162,13 +200,29 @@ func scanInput(out chan<- string) {
 	}
 }
 
-func runConnection(addr string, cfg invite.Config, displayName string, lines <-chan string, quit <-chan struct{}) error {
+func dialRelay(endpoint relayEndpoint) (net.Conn, error) {
+	switch endpoint.scheme {
+	case "tcp":
+		return net.Dial("tcp", endpoint.address)
+	case "tls":
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		tlsCfg := &tls.Config{
+			MinVersion: tls.VersionTLS13,
+			ServerName: endpoint.serverName,
+		}
+		return tls.DialWithDialer(dialer, "tcp", endpoint.address, tlsCfg)
+	default:
+		return nil, fmt.Errorf("unsupported relay scheme %q", endpoint.scheme)
+	}
+}
+
+func runConnection(endpoint relayEndpoint, cfg invite.Config, displayName string, lines <-chan string, quit <-chan struct{}) error {
 	session, err := roomcrypto.NewSession(cfg.RoomSecret[:])
 	if err != nil {
 		return err
 	}
 
-	conn, err := net.Dial("tcp", addr)
+	conn, err := dialRelay(endpoint)
 	if err != nil {
 		return err
 	}

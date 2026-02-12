@@ -1,7 +1,11 @@
 module golang.org/x/crypto
 
-go 1.24.5
+go 1.20
 
-require golang.org/x/sys v0.0.0
+require (
+	golang.org/x/net v0.21.0 // tagx:ignore
+	golang.org/x/sys v0.30.0
+	golang.org/x/term v0.29.0
+)
 
-replace golang.org/x/sys => ../sys
+require golang.org/x/text v0.22.0 // indirect

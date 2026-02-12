@@ -56,19 +56,15 @@ func BuildInviteConfig(req BundleRequest, defaultRelayURL string) (invite.Config
 	if err != nil {
 		return invite.Config{}, "", err
 	}
-	passwordSalt, passwordVerifier, err := invite.GeneratePasswordVerifier(req.Password)
+	base := invite.Config{
+		RelayURL:      relayURL,
+		RoomSecret:    secret,
+		RoomName:      chatName,
+		CryptoSuiteID: invite.CryptoSuiteIDV1,
+	}
+	cfg, err := invite.ProtectWithPassword(base, req.Password)
 	if err != nil {
 		return invite.Config{}, "", err
-	}
-
-	cfg := invite.Config{
-		RelayURL:         relayURL,
-		RoomSecret:       secret,
-		RoomName:         chatName,
-		CryptoSuiteID:    invite.CryptoSuiteIDV1,
-		PasswordRequired: true,
-		PasswordSalt:     passwordSalt,
-		PasswordVerifier: passwordVerifier,
 	}
 
 	// Parse what we just marshaled to guarantee normalized fields are populated and valid.
@@ -76,11 +72,14 @@ func BuildInviteConfig(req BundleRequest, defaultRelayURL string) (invite.Config
 	if err != nil {
 		return invite.Config{}, "", err
 	}
-	normalized, err := invite.ParseFooter(footer)
+	parsed, err := invite.ParseFooter(footer)
 	if err != nil {
 		return invite.Config{}, "", err
 	}
-	return normalized, Slug(chatName), nil
+	if _, err := parsed.UnlockWithPassword(req.Password); err != nil {
+		return invite.Config{}, "", err
+	}
+	return cfg, Slug(chatName), nil
 }
 
 func deriveRoomSecret(chatName, password string) ([32]byte, error) {

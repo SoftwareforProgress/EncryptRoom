@@ -258,3 +258,33 @@ func waitForRoomVerifier(t *testing.T, relay *relayServer, roomID string, timeou
 	}
 	t.Fatalf("room verifier not registered in time for room %q", roomID)
 }
+
+func TestNewRelayListenerRejectsConflictingTLSModes(t *testing.T) {
+	_, _, err := newRelayListener(
+		":0",
+		"cert.pem",
+		"key.pem",
+		"chat.example.com",
+		"",
+		"autocert-cache",
+		":80",
+	)
+	if err == nil {
+		t.Fatal("expected conflict error when both cert/key and autocert are configured")
+	}
+}
+
+func TestNewRelayListenerRejectsPartialCertConfig(t *testing.T) {
+	_, _, err := newRelayListener(
+		":0",
+		"cert.pem",
+		"",
+		"",
+		"",
+		"autocert-cache",
+		":80",
+	)
+	if err == nil {
+		t.Fatal("expected error for partial cert/key TLS config")
+	}
+}

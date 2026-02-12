@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	relayURL := flag.String("relay-url", "", "relay TCP URL (required), e.g. tcp://127.0.0.1:8080")
+	relayURL := flag.String("relay-url", "", "relay URL (required), e.g. tcp://127.0.0.1:8080 or tls://relay.example.com:443")
 	roomName := flag.String("room-name", "", "optional human-friendly room name")
 	roomPassword := flag.String("password", "", "optional room password prompt value for client startup")
 	inviteOut := flag.String("out", "invite.bin", "output invite file path")
@@ -37,14 +37,12 @@ func main() {
 		CryptoSuiteID: invite.CryptoSuiteIDV1,
 	}
 	if *roomPassword != "" {
-		passwordSalt, passwordVerifier, err := invite.GeneratePasswordVerifier(*roomPassword)
+		protected, err := invite.ProtectWithPassword(cfg, *roomPassword)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to derive password verifier: %v\n", err)
+			fmt.Fprintf(os.Stderr, "failed to protect invite with password: %v\n", err)
 			os.Exit(1)
 		}
-		cfg.PasswordRequired = true
-		cfg.PasswordSalt = passwordSalt
-		cfg.PasswordVerifier = passwordVerifier
+		cfg = protected
 	}
 
 	footer, err := invite.MarshalFooter(cfg)
@@ -57,14 +55,22 @@ func main() {
 		fmt.Fprintf(os.Stderr, "failed to validate invite: %v\n", err)
 		os.Exit(1)
 	}
+	displayCfg := parsed
+	if *roomPassword != "" {
+		displayCfg, err = parsed.UnlockWithPassword(*roomPassword)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to validate protected invite payload: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	if err := invite.WriteInviteToFile(*inviteOut, parsed); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to write invite file: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("invite written to %s\n", *inviteOut)
-	fmt.Printf("room_id: %s\n", parsed.RoomID)
-	fmt.Printf("room_secret_hex: %s\n", hex.EncodeToString(parsed.RoomSecret[:]))
+	fmt.Printf("room_id: %s\n", displayCfg.RoomID)
+	fmt.Printf("room_secret_hex: %s\n", hex.EncodeToString(displayCfg.RoomSecret[:]))
 
 	if *appendBinary != "" {
 		if *binaryOut == "" {

@@ -79,19 +79,15 @@ func TestMarshalParsePasswordVerifierRoundTrip(t *testing.T) {
 	for i := 0; i < len(secret); i++ {
 		secret[i] = byte(i + 1)
 	}
-	salt, verifier, err := GeneratePasswordVerifier("pw123")
-	if err != nil {
-		t.Fatalf("GeneratePasswordVerifier: %v", err)
+	base := Config{
+		RelayURL:      "tcp://127.0.0.1:8080",
+		RoomName:      "Friends Night",
+		RoomSecret:    secret,
+		CryptoSuiteID: CryptoSuiteIDV1,
 	}
-
-	cfg := Config{
-		RelayURL:         "tcp://127.0.0.1:8080",
-		RoomName:         "Friends Night",
-		RoomSecret:       secret,
-		CryptoSuiteID:    CryptoSuiteIDV1,
-		PasswordRequired: true,
-		PasswordSalt:     salt,
-		PasswordVerifier: verifier,
+	cfg, err := ProtectWithPassword(base, "pw123")
+	if err != nil {
+		t.Fatalf("ProtectWithPassword: %v", err)
 	}
 
 	footer, err := MarshalFooter(cfg)
@@ -103,16 +99,64 @@ func TestMarshalParsePasswordVerifierRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseFooter: %v", err)
 	}
-	if parsed.RoomName != cfg.RoomName {
-		t.Fatalf("room name mismatch: got %q", parsed.RoomName)
-	}
 	if !parsed.PasswordRequired {
 		t.Fatal("expected password required")
+	}
+	if bytes.Contains(footer, secret[:]) {
+		t.Fatal("plaintext room secret should not appear in protected footer")
 	}
 	if !parsed.VerifyPassword("pw123") {
 		t.Fatal("expected password verification to succeed")
 	}
 	if parsed.VerifyPassword("wrong") {
 		t.Fatal("expected wrong password to fail")
+	}
+	if parsed.RoomID != "" || parsed.RelayURL != "" {
+		t.Fatal("expected protected invite to remain locked before password unlock")
+	}
+
+	unlocked, err := parsed.UnlockWithPassword("pw123")
+	if err != nil {
+		t.Fatalf("UnlockWithPassword: %v", err)
+	}
+	if unlocked.RoomName != cfg.RoomName {
+		t.Fatalf("room name mismatch after unlock: got %q", unlocked.RoomName)
+	}
+	if !bytes.Equal(unlocked.RoomSecret[:], secret[:]) {
+		t.Fatal("room secret mismatch after unlock")
+	}
+
+	if _, err := parsed.UnlockWithPassword("wrong"); err == nil {
+		t.Fatal("expected unlock failure for wrong password")
+	}
+}
+
+func TestProtectedInviteTamperFailsOnUnlock(t *testing.T) {
+	secret := [32]byte{}
+	for i := 0; i < len(secret); i++ {
+		secret[i] = byte(i + 1)
+	}
+	base := Config{
+		RelayURL:      "tcp://127.0.0.1:8080",
+		RoomName:      "Friends Night",
+		RoomSecret:    secret,
+		CryptoSuiteID: CryptoSuiteIDV1,
+	}
+	cfg, err := ProtectWithPassword(base, "pw123")
+	if err != nil {
+		t.Fatalf("ProtectWithPassword: %v", err)
+	}
+	footer, err := MarshalFooter(cfg)
+	if err != nil {
+		t.Fatalf("MarshalFooter: %v", err)
+	}
+
+	footer[len(footer)-1] ^= 0xFF
+	parsed, err := ParseFooter(footer)
+	if err != nil {
+		t.Fatalf("ParseFooter: %v", err)
+	}
+	if _, err := parsed.UnlockWithPassword("pw123"); err == nil {
+		t.Fatal("expected unlock failure for tampered protected payload")
 	}
 }

@@ -25,6 +25,7 @@ EncryptRoom is a private, stateless terminal chatroom in Go.
 - A compromised client can reveal room secrets and plaintext.
 - Membership revocation requires rotating to a new room secret/invite.
 - No anonymity against network observers: relay connection endpoints are visible at the network layer.
+- If you run relays over `tcp://` (no TLS), network observers can still read relay handshake metadata and traffic timing.
 
 See `SECURITY.md` for details.
 
@@ -32,7 +33,8 @@ See `SECURITY.md` for details.
 
 ### Room secret and room ID
 
-- Invite contains a 32-byte high-entropy room secret.
+- Room secret is 32-byte high entropy.
+- For password-protected invites, the binary stores a password-wrapped room secret (not plaintext room secret).
 - `room_id` is derived from room secret (`SHA-256`-based derivation, truncated hex).
 
 ### Relay authentication (no password sent)
@@ -94,14 +96,13 @@ Binary footer appended to client executable:
 3. `uint32` payload length
 4. payload bytes
 
-Payload contains room secret plus encrypted+authenticated config fields:
+Payload supports two modes:
 
-- `relay_url`
-- `room_id`
-- `room_name` (for display in client connect banner)
-- `room_secret`
-- `crypto_suite_id`
-- `password_required` + salted password verifier metadata (for local password prompt/verification)
+- Unprotected/dev invites: legacy embedded room secret mode.
+- Password-protected invites:
+  - room secret and metadata are encrypted with a password-derived key (`Argon2id` + `ChaCha20-Poly1305`)
+  - password verifier is derived locally and compared client-side only
+  - plaintext room secret is not present in the binary footer
 
 For development, client can load an external invite file (`-invite-file`).
 
@@ -113,6 +114,25 @@ For development, client can load an external invite file (`-invite-file`).
 go run ./cmd/encryptroom-relay -listen :8080
 ```
 
+Optional TLS with existing cert/key:
+
+```bash
+go run ./cmd/encryptroom-relay \
+  -listen :443 \
+  -tls-cert-file /path/fullchain.pem \
+  -tls-key-file /path/privkey.pem
+```
+
+Optional TLS with Let's Encrypt autocert:
+
+```bash
+go run ./cmd/encryptroom-relay \
+  -listen :443 \
+  -tls-autocert-domains chat.example.com \
+  -tls-autocert-email admin@example.com \
+  -tls-autocert-http-addr :80
+```
+
 ### 2. Run API server for React app bundle generation
 
 ```bash
@@ -120,6 +140,8 @@ go run ./cmd/encryptroom-api \
   -listen :8090 \
   -relay-url tcp://127.0.0.1:8080
 ```
+
+For production relay TLS, set `-relay-url tls://chat.example.com:443`.
 
 ### 3. Create/download a 3-binary bundle via API
 
@@ -164,7 +186,7 @@ URL.revokeObjectURL(href);
 
 ### 5. Run client from extracted binary
 
-Start the binary and enter display name. If the invite was created via API, it then prompts for the room password used in API creation.
+Start the binary and enter display name. If the invite was created via API, it then prompts for the room password used in API creation (hidden terminal input).
 On success it connects and shows the room name from the invite (for example: `friends-night (room_id)`).
 Peers receive encrypted presence notices when a client joins or gracefully exits (`Ctrl+C`, `/exit`, `/quit`).
 

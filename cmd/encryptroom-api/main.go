@@ -55,7 +55,7 @@ type apiServer struct {
 func main() {
 	listenAddr := flag.String("listen", ":8090", "HTTP listen address")
 	projectRoot := flag.String("project-root", ".", "project root used for cross-compiling client binaries")
-	defaultRelayURL := flag.String("relay-url", "", "default relay URL injected into invites (required), e.g. tcp://relay.example.com:8080")
+	defaultRelayURL := flag.String("relay-url", "", "default relay URL injected into invites (required), e.g. tcp://127.0.0.1:8080 or tls://relay.example.com:443")
 	corsAllowOrigin := flag.String("cors-allow-origin", "*", "Access-Control-Allow-Origin value")
 	buildTimeout := flag.Duration("build-timeout", 120*time.Second, "timeout for one bundle build")
 	flag.Parse()
