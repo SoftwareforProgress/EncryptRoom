@@ -10,11 +10,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fyroc/encryptroom/internal/invite"
@@ -48,8 +51,21 @@ type apiServer struct {
 	defaultRelayURL  string
 	corsAllowOrigin  string
 	buildTimeout     time.Duration
+	rateLimiter      *rateLimiter
 	targets          []buildTarget
 	buildConcurrency chan struct{}
+}
+
+type rateLimiter struct {
+	mu          sync.Mutex
+	window      time.Duration
+	maxRequests int
+	entries     map[string]rateEntry
+}
+
+type rateEntry struct {
+	windowStart time.Time
+	count       int
 }
 
 func main() {
@@ -58,14 +74,27 @@ func main() {
 	defaultRelayURL := flag.String("relay-url", "", "default relay URL injected into invites (required), e.g. tcp://127.0.0.1:8080 or tls://relay.example.com:443")
 	corsAllowOrigin := flag.String("cors-allow-origin", "*", "Access-Control-Allow-Origin value")
 	buildTimeout := flag.Duration("build-timeout", 120*time.Second, "timeout for one bundle build")
+	rateLimitWindow := flag.Duration("rate-limit-window", time.Minute, "per-client rate-limit window for bundle creation (0 to disable)")
+	rateLimitMax := flag.Int("rate-limit-max", 1, "max bundle creation requests per client within rate-limit-window (0 to disable)")
 	flag.Parse()
 
 	if strings.TrimSpace(*defaultRelayURL) == "" {
 		log.Fatal("-relay-url is required")
 	}
+	if *rateLimitWindow < 0 {
+		log.Fatal("-rate-limit-window cannot be negative")
+	}
+	if *rateLimitMax < 0 {
+		log.Fatal("-rate-limit-max cannot be negative")
+	}
 	root, err := filepath.Abs(*projectRoot)
 	if err != nil {
 		log.Fatalf("invalid project root: %v", err)
+	}
+
+	var limiter *rateLimiter
+	if *rateLimitWindow > 0 && *rateLimitMax > 0 {
+		limiter = newRateLimiter(*rateLimitWindow, *rateLimitMax)
 	}
 
 	srv := &apiServer{
@@ -73,6 +102,7 @@ func main() {
 		defaultRelayURL: *defaultRelayURL,
 		corsAllowOrigin: *corsAllowOrigin,
 		buildTimeout:    *buildTimeout,
+		rateLimiter:     limiter,
 		targets: []buildTarget{
 			{goos: "windows", goarch: "amd64", ext: ".exe"},
 			{goos: "darwin", goarch: "arm64", ext: ""},
@@ -113,6 +143,14 @@ func (s *apiServer) handleCreateBundle(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if ok, retryAfter := s.allowCreateBundle(r); !ok {
+		if retryAfter > 0 {
+			seconds := int((retryAfter + time.Second - 1) / time.Second)
+			w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		}
+		writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded; try again later")
 		return
 	}
 
@@ -365,4 +403,69 @@ func trimBuildOutput(out []byte) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+func newRateLimiter(window time.Duration, maxRequests int) *rateLimiter {
+	return &rateLimiter{
+		window:      window,
+		maxRequests: maxRequests,
+		entries:     make(map[string]rateEntry),
+	}
+}
+
+func (s *apiServer) allowCreateBundle(r *http.Request) (bool, time.Duration) {
+	if s.rateLimiter == nil {
+		return true, 0
+	}
+	return s.rateLimiter.allow(clientAddress(r), time.Now())
+}
+
+func (l *rateLimiter) allow(key string, now time.Time) (bool, time.Duration) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	for k, entry := range l.entries {
+		if now.Sub(entry.windowStart) >= l.window {
+			delete(l.entries, k)
+		}
+	}
+
+	entry, ok := l.entries[key]
+	if !ok || now.Sub(entry.windowStart) >= l.window {
+		l.entries[key] = rateEntry{
+			windowStart: now,
+			count:       1,
+		}
+		return true, 0
+	}
+	if entry.count >= l.maxRequests {
+		return false, l.window - now.Sub(entry.windowStart)
+	}
+
+	entry.count++
+	l.entries[key] = entry
+	return true, 0
+}
+
+func clientAddress(r *http.Request) string {
+	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+		parts := strings.Split(xff, ",")
+		if len(parts) > 0 {
+			first := strings.TrimSpace(parts[0])
+			if first != "" {
+				return first
+			}
+		}
+	}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-Ip")); realIP != "" {
+		return realIP
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil && host != "" {
+		return host
+	}
+	if r.RemoteAddr != "" {
+		return r.RemoteAddr
+	}
+	return "unknown"
 }
