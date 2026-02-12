@@ -261,7 +261,7 @@ func (s *apiServer) generateBundle(ctx context.Context, cfg invite.Config, slug 
 }
 
 func buildClientBinary(ctx context.Context, projectRoot, cacheDir, modCacheDir string, target buildTarget, outPath string) error {
-	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", outPath, "./cmd/encryptroom")
+	cmd := exec.CommandContext(ctx, "go", "build", "-buildvcs=false", "-trimpath", "-o", outPath, "./cmd/encryptroom")
 	cmd.Dir = projectRoot
 	cmd.Env = append(os.Environ(),
 		"GOOS="+target.goos,
