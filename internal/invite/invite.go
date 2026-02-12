@@ -352,10 +352,14 @@ func normalizeUnlockedConfig(cfg Config) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("%w: %v", ErrInviteInvalidPayload, err)
 	}
+	legacyRoomID, err := roomcrypto.DeriveLegacyRoomID(cfg.RoomSecret[:])
+	if err != nil {
+		return Config{}, fmt.Errorf("%w: %v", ErrInviteInvalidPayload, err)
+	}
 	if cfg.RoomID == "" {
 		cfg.RoomID = derivedRoomID
 	}
-	if cfg.RoomID != derivedRoomID {
+	if cfg.RoomID != derivedRoomID && cfg.RoomID != legacyRoomID {
 		return Config{}, fmt.Errorf("%w: room_id does not match room_secret", ErrInviteInvalidPayload)
 	}
 	if cfg.CryptoSuiteID == "" {

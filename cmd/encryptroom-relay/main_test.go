@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net"
@@ -16,8 +15,8 @@ func TestAuthenticateSuccess(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer clientConn.Close()
 
-	roomID := "room-a"
 	verifier := testVerifier()
+	roomID := protocol.DeriveRoomIDFromVerifier(verifier)
 
 	type result struct {
 		roomID   string
@@ -54,8 +53,8 @@ func TestAuthenticateRejectsBadResponse(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer clientConn.Close()
 
-	roomID := "room-a"
 	verifier := testVerifier()
+	roomID := protocol.DeriveRoomIDFromVerifier(verifier)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -123,8 +122,8 @@ func TestAuthenticateRejectsBadResponse(t *testing.T) {
 
 func TestRelayForwardsOpaqueCiphertextAndDropsInvalidFrameType(t *testing.T) {
 	relay := &relayServer{rooms: make(map[string]*roomState)}
-	roomID := "room-a"
 	verifier := testVerifier()
+	roomID := protocol.DeriveRoomIDFromVerifier(verifier)
 
 	serverA, clientA := net.Pipe()
 	serverB, clientB := net.Pipe()
@@ -186,10 +185,6 @@ func performAuth(t *testing.T, conn net.Conn, roomID string, verifier [32]byte, 
 	defer conn.SetDeadline(time.Time{})
 
 	hello := protocol.HelloPayload{Proto: protocol.ProtocolVersion, RoomID: roomID}
-	if sendVerifierOnAuth {
-		// Legacy compatibility field; relay ignores it for existing rooms.
-		hello.RoomAuth = base64.StdEncoding.EncodeToString(verifier[:])
-	}
 	helloBytes, err := json.Marshal(hello)
 	if err != nil {
 		t.Fatalf("marshal hello: %v", err)
@@ -257,6 +252,76 @@ func waitForRoomVerifier(t *testing.T, relay *relayServer, roomID string, timeou
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("room verifier not registered in time for room %q", roomID)
+}
+
+func TestAuthenticateRejectsRoomIDVerifierMismatch(t *testing.T) {
+	relay := &relayServer{rooms: make(map[string]*roomState)}
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	verifier := testVerifier()
+	roomID := "not-derived-from-verifier"
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, _, err := relay.authenticate(serverConn)
+		errCh <- err
+		_ = serverConn.Close()
+	}()
+
+	if err := clientConn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	defer clientConn.SetDeadline(time.Time{})
+
+	helloBytes, err := json.Marshal(protocol.HelloPayload{Proto: protocol.ProtocolVersion, RoomID: roomID})
+	if err != nil {
+		t.Fatalf("marshal hello: %v", err)
+	}
+	if err := protocol.WriteFrame(clientConn, protocol.FrameTypeHello, helloBytes); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+
+	frameType, challengePayload, err := protocol.ReadFrame(clientConn)
+	if err != nil {
+		t.Fatalf("read challenge: %v", err)
+	}
+	if frameType != protocol.FrameTypeChallenge {
+		t.Fatalf("unexpected challenge frame type: %d", frameType)
+	}
+	challenge, requireVerifier, err := protocol.DecodeChallenge(challengePayload)
+	if err != nil {
+		t.Fatalf("decode challenge: %v", err)
+	}
+	if !requireVerifier {
+		t.Fatal("expected verifier to be required for new room")
+	}
+
+	response := protocol.ComputeChallengeResponse(verifier, challenge)
+	authPayload := protocol.EncodeAuthResponse(response, &verifier)
+	if err := protocol.WriteFrame(clientConn, protocol.FrameTypeAuth, authPayload); err != nil {
+		t.Fatalf("write auth: %v", err)
+	}
+
+	frameType, payload, err := protocol.ReadFrame(clientConn)
+	if err != nil {
+		t.Fatalf("read auth result: %v", err)
+	}
+	if frameType != protocol.FrameTypeAuthError {
+		t.Fatalf("expected auth error, got %d", frameType)
+	}
+	if string(payload) == "" {
+		t.Fatal("expected auth error payload")
+	}
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected authenticate error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for authenticate error")
+	}
 }
 
 func TestNewRelayListenerRejectsConflictingTLSModes(t *testing.T) {

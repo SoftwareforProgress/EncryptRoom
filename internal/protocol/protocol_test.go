@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"testing"
+
+	roomcrypto "github.com/fyroc/encryptroom/internal/crypto"
 )
 
 func TestChallengeResponseVerification(t *testing.T) {
@@ -127,5 +129,22 @@ func TestAuthEncodingRoundTrip(t *testing.T) {
 	}
 	if gotVerifier != nil {
 		t.Fatal("expected nil verifier")
+	}
+}
+
+func TestDeriveRoomIDFromVerifierMatchesCryptoDerivation(t *testing.T) {
+	secret := [32]byte{}
+	for i := range secret {
+		secret[i] = byte(i + 10)
+	}
+	verifier := DeriveRoomAuthVerifier(secret)
+	got := DeriveRoomIDFromVerifier(verifier)
+
+	want, err := roomcrypto.DeriveRoomID(secret[:])
+	if err != nil {
+		t.Fatalf("DeriveRoomID: %v", err)
+	}
+	if got != want {
+		t.Fatalf("room id mismatch: got %q want %q", got, want)
 	}
 }

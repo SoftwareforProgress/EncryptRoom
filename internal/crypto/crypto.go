@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ecdh"
 	"crypto/hkdf"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -181,11 +182,36 @@ func DeriveRoomID(roomSecret []byte) (string, error) {
 	if len(roomSecret) != RoomSecretSize {
 		return "", ErrInvalidSecretSize
 	}
+	verifier := deriveRoomAuthVerifier(roomSecret)
+	return deriveRoomIDFromVerifier(verifier[:]), nil
+}
+
+// DeriveLegacyRoomID preserves the original room-id derivation used before verifier binding.
+func DeriveLegacyRoomID(roomSecret []byte) (string, error) {
+	if len(roomSecret) != RoomSecretSize {
+		return "", ErrInvalidSecretSize
+	}
 	h := sha256.New()
 	h.Write([]byte("encryptroom/room-id/v1"))
 	h.Write(roomSecret)
 	sum := h.Sum(nil)
 	return hex.EncodeToString(sum[:16]), nil
+}
+
+func deriveRoomAuthVerifier(roomSecret []byte) [32]byte {
+	mac := hmac.New(sha256.New, roomSecret)
+	mac.Write([]byte("encryptroom/relay-auth/v1"))
+	var out [32]byte
+	copy(out[:], mac.Sum(nil))
+	return out
+}
+
+func deriveRoomIDFromVerifier(verifier []byte) string {
+	h := sha256.New()
+	h.Write([]byte("encryptroom/room-id/v2:verifier"))
+	h.Write(verifier)
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:16])
 }
 
 func deriveAEADKey(shared, roomSecret, senderPub []byte) ([]byte, error) {

@@ -246,6 +246,11 @@ func (r *relayServer) authenticate(conn net.Conn) (string, [32]byte, error) {
 			_ = writeAuthError(conn, "room verifier required")
 			return hello.RoomID, verifier, errors.New("missing room verifier")
 		}
+		expectedRoomID := protocol.DeriveRoomIDFromVerifier(*authVerifier)
+		if hello.RoomID != expectedRoomID {
+			_ = writeAuthError(conn, "room id mismatch")
+			return hello.RoomID, verifier, errors.New("room id mismatch")
+		}
 		verifier = *authVerifier
 	} else if authVerifier != nil {
 		_ = writeAuthError(conn, "unexpected room verifier")

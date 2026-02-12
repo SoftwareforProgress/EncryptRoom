@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -52,6 +53,7 @@ type apiServer struct {
 	corsAllowOrigin  string
 	buildTimeout     time.Duration
 	rateLimiter      *rateLimiter
+	trustedProxies   []*net.IPNet
 	targets          []buildTarget
 	buildConcurrency chan struct{}
 }
@@ -60,10 +62,13 @@ type rateLimiter struct {
 	mu          sync.Mutex
 	window      time.Duration
 	maxRequests int
-	entries     map[string]rateEntry
+	maxKeys     int
+	entries     map[string]*list.Element
+	order       *list.List
 }
 
 type rateEntry struct {
+	key         string
 	windowStart time.Time
 	count       int
 }
@@ -76,6 +81,8 @@ func main() {
 	buildTimeout := flag.Duration("build-timeout", 120*time.Second, "timeout for one bundle build")
 	rateLimitWindow := flag.Duration("rate-limit-window", time.Minute, "per-client rate-limit window for bundle creation (0 to disable)")
 	rateLimitMax := flag.Int("rate-limit-max", 1, "max bundle creation requests per client within rate-limit-window (0 to disable)")
+	rateLimitMaxKeys := flag.Int("rate-limit-max-keys", 10000, "max distinct client keys tracked by rate limiter")
+	trustedProxyCIDRs := flag.String("trusted-proxy-cidrs", "127.0.0.0/8,::1/128", "comma-separated proxy CIDRs trusted for forwarded IP headers")
 	flag.Parse()
 
 	if strings.TrimSpace(*defaultRelayURL) == "" {
@@ -87,14 +94,25 @@ func main() {
 	if *rateLimitMax < 0 {
 		log.Fatal("-rate-limit-max cannot be negative")
 	}
+	if *rateLimitMaxKeys < 0 {
+		log.Fatal("-rate-limit-max-keys cannot be negative")
+	}
 	root, err := filepath.Abs(*projectRoot)
 	if err != nil {
 		log.Fatalf("invalid project root: %v", err)
 	}
 
+	trustedProxies, err := parseTrustedProxyCIDRs(*trustedProxyCIDRs)
+	if err != nil {
+		log.Fatalf("invalid -trusted-proxy-cidrs: %v", err)
+	}
+
 	var limiter *rateLimiter
 	if *rateLimitWindow > 0 && *rateLimitMax > 0 {
-		limiter = newRateLimiter(*rateLimitWindow, *rateLimitMax)
+		if *rateLimitMaxKeys == 0 {
+			log.Fatal("-rate-limit-max-keys must be > 0 when rate limiting is enabled")
+		}
+		limiter = newRateLimiter(*rateLimitWindow, *rateLimitMax, *rateLimitMaxKeys)
 	}
 
 	srv := &apiServer{
@@ -103,6 +121,7 @@ func main() {
 		corsAllowOrigin: *corsAllowOrigin,
 		buildTimeout:    *buildTimeout,
 		rateLimiter:     limiter,
+		trustedProxies:  trustedProxies,
 		targets: []buildTarget{
 			{goos: "windows", goarch: "amd64", ext: ".exe"},
 			{goos: "darwin", goarch: "arm64", ext: ""},
@@ -405,11 +424,13 @@ func trimBuildOutput(out []byte) string {
 	return s[:max] + "..."
 }
 
-func newRateLimiter(window time.Duration, maxRequests int) *rateLimiter {
+func newRateLimiter(window time.Duration, maxRequests int, maxKeys int) *rateLimiter {
 	return &rateLimiter{
 		window:      window,
 		maxRequests: maxRequests,
-		entries:     make(map[string]rateEntry),
+		maxKeys:     maxKeys,
+		entries:     make(map[string]*list.Element),
+		order:       list.New(),
 	}
 }
 
@@ -417,55 +438,119 @@ func (s *apiServer) allowCreateBundle(r *http.Request) (bool, time.Duration) {
 	if s.rateLimiter == nil {
 		return true, 0
 	}
-	return s.rateLimiter.allow(clientAddress(r), time.Now())
+	return s.rateLimiter.allow(clientAddress(r, s.trustedProxies), time.Now())
 }
 
 func (l *rateLimiter) allow(key string, now time.Time) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	for k, entry := range l.entries {
-		if now.Sub(entry.windowStart) >= l.window {
-			delete(l.entries, k)
-		}
+	l.pruneExpired(now)
+	if key == "" {
+		key = "unknown"
 	}
 
-	entry, ok := l.entries[key]
-	if !ok || now.Sub(entry.windowStart) >= l.window {
-		l.entries[key] = rateEntry{
-			windowStart: now,
-			count:       1,
+	if existing, ok := l.entries[key]; ok {
+		entry := existing.Value.(*rateEntry)
+		if entry.count >= l.maxRequests {
+			return false, l.window - now.Sub(entry.windowStart)
 		}
+		entry.count++
+		l.order.MoveToBack(existing)
 		return true, 0
 	}
-	if entry.count >= l.maxRequests {
-		return false, l.window - now.Sub(entry.windowStart)
+
+	if l.maxKeys > 0 && len(l.entries) >= l.maxKeys {
+		oldest := l.order.Front()
+		if oldest != nil {
+			entry := oldest.Value.(*rateEntry)
+			delete(l.entries, entry.key)
+			l.order.Remove(oldest)
+		}
 	}
 
-	entry.count++
-	l.entries[key] = entry
+	entry := &rateEntry{
+		key:         key,
+		windowStart: now,
+		count:       1,
+	}
+	elem := l.order.PushBack(entry)
+	l.entries[key] = elem
 	return true, 0
 }
 
-func clientAddress(r *http.Request) string {
-	if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
-		parts := strings.Split(xff, ",")
-		if len(parts) > 0 {
-			first := strings.TrimSpace(parts[0])
-			if first != "" {
-				return first
+func (l *rateLimiter) pruneExpired(now time.Time) {
+	for {
+		oldest := l.order.Front()
+		if oldest == nil {
+			return
+		}
+		entry := oldest.Value.(*rateEntry)
+		if now.Sub(entry.windowStart) < l.window {
+			return
+		}
+		delete(l.entries, entry.key)
+		l.order.Remove(oldest)
+	}
+}
+
+func clientAddress(r *http.Request, trustedProxies []*net.IPNet) string {
+	sourceIP := remoteIP(r.RemoteAddr)
+	if sourceIP == nil {
+		return "unknown"
+	}
+	if isTrustedProxy(sourceIP, trustedProxies) {
+		if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+			parts := strings.Split(xff, ",")
+			if len(parts) > 0 {
+				first := strings.TrimSpace(parts[0])
+				if ip := net.ParseIP(first); ip != nil {
+					return ip.String()
+				}
+			}
+		}
+		if realIP := strings.TrimSpace(r.Header.Get("X-Real-Ip")); realIP != "" {
+			if ip := net.ParseIP(realIP); ip != nil {
+				return ip.String()
 			}
 		}
 	}
-	if realIP := strings.TrimSpace(r.Header.Get("X-Real-Ip")); realIP != "" {
-		return realIP
+	return sourceIP.String()
+}
+
+func remoteIP(remoteAddr string) net.IP {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil {
+		return net.ParseIP(host)
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil && host != "" {
-		return host
+	return net.ParseIP(remoteAddr)
+}
+
+func isTrustedProxy(ip net.IP, trustedProxies []*net.IPNet) bool {
+	for _, cidr := range trustedProxies {
+		if cidr.Contains(ip) {
+			return true
+		}
 	}
-	if r.RemoteAddr != "" {
-		return r.RemoteAddr
+	return false
+}
+
+func parseTrustedProxyCIDRs(raw string) ([]*net.IPNet, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
 	}
-	return "unknown"
+	parts := strings.Split(raw, ",")
+	out := make([]*net.IPNet, 0, len(parts))
+	for _, part := range parts {
+		cidrText := strings.TrimSpace(part)
+		if cidrText == "" {
+			continue
+		}
+		_, network, err := net.ParseCIDR(cidrText)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CIDR %q: %w", cidrText, err)
+		}
+		out = append(out, network)
+	}
+	return out, nil
 }

@@ -35,7 +35,7 @@ See `SECURITY.md` for details.
 
 - Room secret is 32-byte high entropy.
 - For password-protected invites, the binary stores a password-wrapped room secret (not plaintext room secret).
-- `room_id` is derived from room secret (`SHA-256`-based derivation, truncated hex).
+- `room_id` is derived from relay auth verifier material (`SHA-256`-based derivation, truncated hex), so relay can validate first-room bootstrap without trusting first writer.
 
 ### Relay authentication (no password sent)
 
@@ -70,6 +70,7 @@ See `SECURITY.md` for details.
 - Automatic group membership rekeying.
 - Strong post-compromise guarantees after client compromise.
 - Advanced metadata protection.
+- Full backward-compatibility for bootstrapping fresh rooms with pre-hardening invite derivation (re-generate invites if a legacy invite cannot initialize a brand new empty relay).
 
 ## Repository layout
 

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -45,6 +46,16 @@ func DeriveRoomAuthVerifier(roomSecret [32]byte) [32]byte {
 	var out [32]byte
 	copy(out[:], mac.Sum(nil))
 	return out
+}
+
+// DeriveRoomIDFromVerifier binds room IDs to the auth verifier so relays can validate
+// initial room creation attempts without trusting first-writer supplied IDs.
+func DeriveRoomIDFromVerifier(verifier [32]byte) string {
+	h := sha256.New()
+	h.Write([]byte("encryptroom/room-id/v2:verifier"))
+	h.Write(verifier[:])
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:16])
 }
 
 func NewChallenge() ([challengeSize]byte, error) {
