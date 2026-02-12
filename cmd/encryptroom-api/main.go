@@ -52,6 +52,8 @@ type apiServer struct {
 	defaultRelayURL  string
 	corsAllowOrigin  string
 	buildTimeout     time.Duration
+	goCacheDir       string
+	goModCacheDir    string
 	rateLimiter      *rateLimiter
 	trustedProxies   []*net.IPNet
 	targets          []buildTarget
@@ -79,6 +81,8 @@ func main() {
 	defaultRelayURL := flag.String("relay-url", "", "default relay URL injected into invites (required), e.g. tcp://127.0.0.1:8080 or tls://relay.example.com:443")
 	corsAllowOrigin := flag.String("cors-allow-origin", "*", "Access-Control-Allow-Origin value")
 	buildTimeout := flag.Duration("build-timeout", 120*time.Second, "timeout for one bundle build")
+	goCacheDir := flag.String("go-cache-dir", filepath.Join(os.TempDir(), "encryptroom-api-go-build"), "persistent GOCACHE directory used for bundle builds")
+	goModCacheDir := flag.String("go-mod-cache-dir", filepath.Join(os.TempDir(), "encryptroom-api-go-mod"), "persistent GOMODCACHE directory used for bundle builds")
 	rateLimitWindow := flag.Duration("rate-limit-window", time.Minute, "per-client rate-limit window for bundle creation (0 to disable)")
 	rateLimitMax := flag.Int("rate-limit-max", 1, "max bundle creation requests per client within rate-limit-window (0 to disable)")
 	rateLimitMaxKeys := flag.Int("rate-limit-max-keys", 10000, "max distinct client keys tracked by rate limiter")
@@ -101,6 +105,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid project root: %v", err)
 	}
+	buildCacheRoot, err := filepath.Abs(*goCacheDir)
+	if err != nil {
+		log.Fatalf("invalid go cache dir: %v", err)
+	}
+	modCacheRoot, err := filepath.Abs(*goModCacheDir)
+	if err != nil {
+		log.Fatalf("invalid go mod cache dir: %v", err)
+	}
+	if err := os.MkdirAll(buildCacheRoot, 0o700); err != nil {
+		log.Fatalf("failed to create go cache dir: %v", err)
+	}
+	if err := os.MkdirAll(modCacheRoot, 0o700); err != nil {
+		log.Fatalf("failed to create go mod cache dir: %v", err)
+	}
 
 	trustedProxies, err := parseTrustedProxyCIDRs(*trustedProxyCIDRs)
 	if err != nil {
@@ -120,6 +138,8 @@ func main() {
 		defaultRelayURL: *defaultRelayURL,
 		corsAllowOrigin: *corsAllowOrigin,
 		buildTimeout:    *buildTimeout,
+		goCacheDir:      buildCacheRoot,
+		goModCacheDir:   modCacheRoot,
 		rateLimiter:     limiter,
 		trustedProxies:  trustedProxies,
 		targets: []buildTarget{
@@ -228,19 +248,10 @@ func (s *apiServer) generateBundle(ctx context.Context, cfg invite.Config, slug 
 	}
 	defer os.RemoveAll(tmpDir)
 
-	cacheDir := filepath.Join(tmpDir, "go-build-cache")
-	modCacheDir := filepath.Join(tmpDir, "go-mod-cache")
-	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
-		return nil, "", err
-	}
-	if err := os.MkdirAll(modCacheDir, 0o700); err != nil {
-		return nil, "", err
-	}
-
 	artifacts := make([]artifact, 0, len(s.targets))
 	for _, target := range s.targets {
 		basePath := filepath.Join(tmpDir, fmt.Sprintf("encryptroom-base-%s-%s%s", target.goos, target.goarch, target.ext))
-		if err := buildClientBinary(ctx, s.projectRoot, cacheDir, modCacheDir, target, basePath); err != nil {
+		if err := buildClientBinary(ctx, s.projectRoot, s.goCacheDir, s.goModCacheDir, target, basePath); err != nil {
 			return nil, "", err
 		}
 
