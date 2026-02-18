@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	roomcrypto "github.com/fyroc/encryptroom/internal/crypto"
+	roomcrypto "github.com/softwareforprogress/encryptroom/internal/crypto"
 )
 
 func TestChallengeResponseVerification(t *testing.T) {

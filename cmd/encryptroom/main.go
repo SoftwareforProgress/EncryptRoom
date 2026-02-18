@@ -15,9 +15,9 @@ import (
 	"syscall"
 	"time"
 
-	roomcrypto "github.com/fyroc/encryptroom/internal/crypto"
-	"github.com/fyroc/encryptroom/internal/invite"
-	"github.com/fyroc/encryptroom/internal/protocol"
+	roomcrypto "github.com/softwareforprogress/encryptroom/internal/crypto"
+	"github.com/softwareforprogress/encryptroom/internal/invite"
+	"github.com/softwareforprogress/encryptroom/internal/protocol"
 	"golang.org/x/term"
 )
 

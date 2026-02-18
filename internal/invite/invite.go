@@ -16,7 +16,7 @@ import (
 	"os"
 	"strings"
 
-	roomcrypto "github.com/fyroc/encryptroom/internal/crypto"
+	roomcrypto "github.com/softwareforprogress/encryptroom/internal/crypto"
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
 )

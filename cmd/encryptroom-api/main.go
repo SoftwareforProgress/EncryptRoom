@@ -21,8 +21,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fyroc/encryptroom/internal/invite"
-	"github.com/fyroc/encryptroom/internal/provision"
+	"github.com/softwareforprogress/encryptroom/internal/invite"
+	"github.com/softwareforprogress/encryptroom/internal/provision"
 )
 
 type buildTarget struct {

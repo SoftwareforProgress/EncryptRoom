@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/fyroc/encryptroom/internal/invite"
+	"github.com/softwareforprogress/encryptroom/internal/invite"
 )
 
 func main() {

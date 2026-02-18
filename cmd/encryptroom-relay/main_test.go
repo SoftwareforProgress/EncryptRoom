@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fyroc/encryptroom/internal/protocol"
+	"github.com/softwareforprogress/encryptroom/internal/protocol"
 )
 
 func TestAuthenticateSuccess(t *testing.T) {

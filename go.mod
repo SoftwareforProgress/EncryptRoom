@@ -1,4 +1,4 @@
-module github.com/fyroc/encryptroom
+module github.com/softwareforprogress/encryptroom
 
 go 1.24.5
 

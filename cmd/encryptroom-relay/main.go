@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fyroc/encryptroom/internal/protocol"
+	"github.com/softwareforprogress/encryptroom/internal/protocol"
 	"golang.org/x/crypto/acme/autocert"
 )
 

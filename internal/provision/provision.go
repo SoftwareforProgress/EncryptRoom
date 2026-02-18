@@ -9,7 +9,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/fyroc/encryptroom/internal/invite"
+	"github.com/softwareforprogress/encryptroom/internal/invite"
 )
 
 const (
